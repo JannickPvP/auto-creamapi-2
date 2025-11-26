@@ -19,7 +19,7 @@ namespace auto_creamapi.ViewModels
     {
         private readonly ICacheService _cache;
         private readonly ICreamConfigService _config;
-
+        private readonly IConfigService _appConfig;
         private readonly ILogger<MainViewModel> _logger;
         private readonly ICreamDllService _dll;
         private readonly IMvxNavigationService _navigationService;
@@ -34,39 +34,66 @@ namespace auto_creamapi.ViewModels
         private string _filesToHide;
         private string _lang;
         private ObservableCollection<string> _languages;
-
-        //private readonly IDownloadCreamApiService _download;
         private bool _mainWindowEnabled;
         private bool _offline;
         private string _status;
         private bool _unlockAll;
-
         private bool _useSteamDb;
-
         private bool _ignoreUnknown;
-        //private const string DlcRegexPattern = @"(?<id>.*) *= *(?<name>.*)";
 
         public MainViewModel(ICacheService cache, ICreamConfigService config, ICreamDllService dll,
-            IMvxNavigationService navigationService, ILoggerFactory loggerFactory)
+            IMvxNavigationService navigationService, ILoggerFactory loggerFactory, IConfigService appConfig)
         {
             _navigationService = navigationService;
             _logger = loggerFactory.CreateLogger<MainViewModel>();
             _cache = cache;
             _config = config;
             _dll = dll;
-            //_download = download;
+            _appConfig = appConfig;
         }
 
         public override async void Prepare()
         {
             base.Prepare();
+            
+            // Check if API key is configured
+            if (!_appConfig.HasSteamApiKey())
+            {
+                MainWindowEnabled = false;
+                Status = "Waiting for API key configuration...";
+                
+                var apiKeyResult = await _navigationService
+                    .Navigate<ApiKeyViewModel, bool, bool>(true)
+                    .ConfigureAwait(false);
+                
+                if (!apiKeyResult)
+                {
+                    // User cancelled on first run, exit application
+                    _logger.LogWarning("API key configuration cancelled on first run");
+                    Status = "API key configuration required. Exiting...";
+                    Environment.Exit(0);
+                    return;
+                }
+            }
+
             _config.Initialize();
             var tasks = new List<Task> { _cache.Initialize() };
             if (!File.Exists("steam_api.dll") | !File.Exists("steam_api64.dll"))
                 tasks.Add(_navigationService.Navigate<DownloadViewModel>());
-            //tasks.Add(_navigationService.Navigate<DownloadViewModel>());
             tasks.Add(_dll.Initialize());
-            await Task.WhenAll(tasks).ConfigureAwait(false);
+            
+            try
+            {
+                await Task.WhenAll(tasks).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error during initialization");
+                Status = $"Error: {ex.Message}";
+                MainWindowEnabled = true;
+                return;
+            }
+            
             Languages = new ObservableCollection<string>(Misc.DefaultLanguages);
             ResetForm();
             UseSteamDb = true;
@@ -77,18 +104,13 @@ namespace auto_creamapi.ViewModels
         // // COMMANDS // //
 
         public IMvxCommand OpenFileCommand => new MvxAsyncCommand(OpenFile);
-
-        public IMvxCommand SearchCommand => new MvxAsyncCommand(async () => await Search().ConfigureAwait(false)); //Command(Search);
-
+        public IMvxCommand SearchCommand => new MvxAsyncCommand(async () => await Search().ConfigureAwait(false));
         public IMvxCommand GetListOfDlcCommand => new MvxAsyncCommand(GetListOfDlc);
-
         public IMvxCommand SaveCommand => new MvxCommand(Save);
-
         public IMvxCommand ResetFormCommand => new MvxCommand(ResetForm);
-
         public IMvxCommand GoToForumThreadCommand => new MvxCommand(GoToForumThread);
-
         public IMvxCommand GoToSteamdbCommand => new MvxCommand(GoToSteamdb);
+        public IMvxCommand OpenApiKeySettingsCommand => new MvxAsyncCommand(OpenApiKeySettings);
 
         // // ATTRIBUTES // //
 
@@ -297,7 +319,6 @@ namespace auto_creamapi.ViewModels
                         var s = index > -1 ? strings[index] : null;
                         if (s != null) GameName = s;
                         await Search().ConfigureAwait(false);
-                        // await GetListOfDlc().ConfigureAwait(false);
                     }
 
                     Status = "Ready.";
@@ -332,8 +353,6 @@ namespace auto_creamapi.ViewModels
                         AppId = navigateResult.AppId;
                     }
                 }
-
-                // await GetListOfDlc().ConfigureAwait(false);
             }
             else
             {
@@ -409,7 +428,7 @@ namespace auto_creamapi.ViewModels
             Status = "Opening URL...";
             if (AppId > 0)
             {
-                var searchTerm = AppId; //$"{GameName.Replace(" ", "+")}+{appId}";
+                var searchTerm = AppId;
                 var destinationUrl =
                     $"https://cs.rin.ru/forum/search.php?keywords={searchTerm}&terms=any&fid[]=10&sf=firstpost&sr=topics&submit=Search";
                 var uri = new Uri(destinationUrl);
@@ -431,9 +450,8 @@ namespace auto_creamapi.ViewModels
             Status = "Opening URL...";
             if (AppId > 0)
             {
-                var searchTerm = AppId; //$"{GameName.Replace(" ", "+")}+{appId}";
-                var destinationUrl =
-                    $"https://steamdb.info/app/{searchTerm}/dlc/";
+                var searchTerm = AppId;
+                var destinationUrl = $"https://steamdb.info/app/{searchTerm}/dlc/";
                 var uri = new Uri(destinationUrl);
                 var process = new ProcessStartInfo(uri.AbsoluteUri)
                 {
@@ -446,6 +464,17 @@ namespace auto_creamapi.ViewModels
                 _logger.LogError("OpenURL: Invalid AppID {AppId}", AppId);
                 Status = $"Could not open URL: Invalid AppID {AppId}";
             }
+        }
+
+        private async Task OpenApiKeySettings()
+        {
+            MainWindowEnabled = false;
+            Status = "Opening API key settings...";
+            
+            await _navigationService.Navigate<ApiKeyViewModel, bool, bool>(false).ConfigureAwait(false);
+            
+            MainWindowEnabled = true;
+            Status = "Ready.";
         }
 
         private void CheckSetupStatus()

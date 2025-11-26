@@ -20,8 +20,6 @@ namespace auto_creamapi.Services
     public interface ICacheService
     {
         public Task Initialize();
-
-        //public Task UpdateCache();
         public IEnumerable<SteamApp> GetListOfAppsByName(string name);
         public SteamApp GetAppByName(string name);
         public SteamApp GetAppById(int appid);
@@ -31,14 +29,21 @@ namespace auto_creamapi.Services
     public class CacheService : ICacheService
     {
         private const string CachePath = "steamapps.json";
-        private const string SteamUri = "https://api.steampowered.com/ISteamApps/GetAppList/v2/";
+        private const string SteamUri = "https://api.steampowered.com/IStoreService/GetAppList/v1/";
+        private readonly IConfigService _configService;
 
         private HashSet<SteamApp> _cache = [];
+
+        public CacheService(IConfigService configService)
+        {
+            _configService = configService;
+        }
 
         public async Task Initialize()
         {
             MyLogger.Log.Information("Updating cache...");
-            var updateNeeded = DateTime.Now.Subtract(File.GetLastWriteTimeUtc(CachePath)).TotalDays >= 1;
+            var updateNeeded = !File.Exists(CachePath) || 
+                             DateTime.Now.Subtract(File.GetLastWriteTimeUtc(CachePath)).TotalDays >= 1;
             string cacheString;
             if (updateNeeded)
             {
@@ -47,28 +52,169 @@ namespace auto_creamapi.Services
             else
             {
                 MyLogger.Log.Information("Cache already up to date!");
-                // ReSharper disable once MethodHasAsyncOverload
                 cacheString = File.ReadAllText(CachePath);
             }
-            var steamApps = JsonSerializer.Deserialize<SteamApps>(cacheString);
-            _cache = new HashSet<SteamApp>(steamApps.AppList.Apps);
-            MyLogger.Log.Information("Loaded cache into memory!");
+
+            // Validate that we have valid JSON before trying to deserialize
+            if (string.IsNullOrWhiteSpace(cacheString) || cacheString.TrimStart().StartsWith("<"))
+            {
+                MyLogger.Log.Error("Cache content is not valid JSON. Content starts with: {Preview}", 
+                    cacheString.Length > 100 ? cacheString.Substring(0, 100) : cacheString);
+                
+                if (File.Exists(CachePath))
+                {
+                    MyLogger.Log.Warning("Attempting to use existing cache file despite age...");
+                    cacheString = File.ReadAllText(CachePath);
+                }
+                else
+                {
+                    throw new InvalidOperationException(
+                        "Failed to retrieve valid Steam app list from API and no cached version exists. " +
+                        "Please check your internet connection and Steam API key, then try again.");
+                }
+            }
+
+            // Parse the API response format
+            var response = JsonSerializer.Deserialize<JsonDocument>(cacheString);
+            var apps = response.RootElement.GetProperty("response").GetProperty("apps");
+            
+            var appList = new List<SteamApp>();
+            foreach (var app in apps.EnumerateArray())
+            {
+                if (app.TryGetProperty("appid", out var appIdElement) && 
+                    app.TryGetProperty("name", out var nameElement))
+                {
+                    appList.Add(new SteamApp
+                    {
+                        AppId = appIdElement.GetInt32(),
+                        Name = nameElement.GetString()
+                    });
+                }
+            }
+            
+            _cache = new HashSet<SteamApp>(appList);
+            MyLogger.Log.Information("Loaded {Count} apps into cache!", _cache.Count);
         }
 
-        private static async Task<string> UpdateCache()
+        private async Task<string> UpdateCache()
         {
             MyLogger.Log.Information("Getting content from API...");
-            var client = new HttpClient();
-            var httpCall = client.GetAsync(SteamUri);
-            var response = await httpCall.ConfigureAwait(false);
-            var readAsStringAsync = response.Content.ReadAsStringAsync();
-            var responseBody = await readAsStringAsync.ConfigureAwait(false);
-            MyLogger.Log.Information("Got content from API successfully. Writing to file...");
+            
+            var apiKey = _configService.GetSteamApiKey();
+            if (string.IsNullOrEmpty(apiKey))
+            {
+                throw new InvalidOperationException(
+                    "Steam API key is not configured. Please set your Steam API key in the settings. " +
+                    "You can get one from: https://steamcommunity.com/dev/apikey");
+            }
 
-            await File.WriteAllTextAsync(CachePath, responseBody, Encoding.UTF8).ConfigureAwait(false);
-            var cacheString = responseBody;
-            MyLogger.Log.Information("Cache written to file successfully.");
-            return cacheString;
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.Add("User-Agent", "auto-creamapi");
+            client.Timeout = TimeSpan.FromSeconds(60);
+
+            var allApps = new List<SteamApp>();
+            int lastAppId = 0;
+            const int maxResults = 50000;
+            bool hasMoreResults = true;
+
+            try
+            {
+                while (hasMoreResults)
+                {
+                    var url = $"{SteamUri}?key={apiKey}&max_results={maxResults}";
+                    if (lastAppId > 0)
+                    {
+                        url += $"&last_appid={lastAppId}";
+                    }
+                    
+                    url += "&include_games=true&include_dlc=true&include_software=true&include_videos=true&include_hardware=true";
+
+                    MyLogger.Log.Debug("Fetching page starting at appid {LastAppId}...", lastAppId);
+                    
+                    var response = await client.GetAsync(url).ConfigureAwait(false);
+                    response.EnsureSuccessStatusCode();
+                    
+                    var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    
+                    if (string.IsNullOrWhiteSpace(responseBody) || responseBody.TrimStart().StartsWith("<"))
+                    {
+                        MyLogger.Log.Error("API returned non-JSON content. Response preview: {Preview}", 
+                            responseBody.Length > 200 ? responseBody.Substring(0, 200) : responseBody);
+                        throw new InvalidOperationException("Steam API returned HTML instead of JSON");
+                    }
+
+                    var jsonDoc = JsonSerializer.Deserialize<JsonDocument>(responseBody);
+                    
+                    if (!jsonDoc.RootElement.TryGetProperty("response", out var responseElement))
+                    {
+                        MyLogger.Log.Error("Response does not contain 'response' property");
+                        break;
+                    }
+
+                    if (!responseElement.TryGetProperty("apps", out var apps))
+                    {
+                        MyLogger.Log.Error("Response does not contain 'apps' property");
+                        break;
+                    }
+
+                    var haveMoreResults = responseElement.TryGetProperty("have_more_results", out var moreResultsElement) 
+                        && moreResultsElement.GetBoolean();
+                    
+                    int count = 0;
+                    foreach (var app in apps.EnumerateArray())
+                    {
+                        if (!app.TryGetProperty("appid", out var appIdElement) || 
+                            !app.TryGetProperty("name", out var nameElement))
+                        {
+                            MyLogger.Log.Warning("Skipping app with missing appid or name");
+                            continue;
+                        }
+
+                        var appId = appIdElement.GetInt32();
+                        var name = nameElement.GetString();
+                        allApps.Add(new SteamApp { AppId = appId, Name = name });
+                        lastAppId = appId;
+                        count++;
+                    }
+
+                    MyLogger.Log.Information("Retrieved {Count} apps (total so far: {Total})", count, allApps.Count);
+                    
+                    if (count == 0 || !haveMoreResults)
+                    {
+                        hasMoreResults = false;
+                    }
+                }
+
+                MyLogger.Log.Information("Got content from API successfully. Writing to file...");
+
+                var cacheData = new
+                {
+                    response = new
+                    {
+                        apps = allApps.Select(a => new { appid = a.AppId, name = a.Name }).ToList()
+                    }
+                };
+
+                var cacheString = JsonSerializer.Serialize(cacheData, new JsonSerializerOptions 
+                { 
+                    WriteIndented = true 
+                });
+
+                await File.WriteAllTextAsync(CachePath, cacheString, Encoding.UTF8).ConfigureAwait(false);
+                MyLogger.Log.Information("Cache written to file successfully.");
+                
+                return cacheString;
+            }
+            catch (HttpRequestException ex)
+            {
+                MyLogger.Log.Error(ex, "HTTP request failed while updating cache");
+                throw;
+            }
+            catch (TaskCanceledException ex)
+            {
+                MyLogger.Log.Error(ex, "Request timed out while updating cache");
+                throw;
+            }
         }
 
         public IEnumerable<SteamApp> GetListOfAppsByName(string name)
@@ -124,7 +270,6 @@ namespace auto_creamapi.Services
                             dlcList.ForEach(x => MyLogger.Log.Debug("{AppId}={Name}", x.AppId, x.Name));
                             MyLogger.Log.Information("Got DLC successfully...");
 
-                            // Return if Steam DB is deactivated
                             if (!useSteamDb) return dlcList;
 
                             string steamDbUrl = $"https://steamdb.info/app/{steamApp.AppId}/dlc/";
@@ -138,15 +283,12 @@ namespace auto_creamapi.Services
                                 return dlcList;
                             }
 
-                            //language=regex
                             const string pattern = @"^(https?:\/\/web\.archive\.org\/web\/\d+)(\/.+)$";
                             const string substitution = "$1id_$2";
                             const RegexOptions options = RegexOptions.Multiline;
 
                             Regex regex = new(pattern, options);
                             string newUrl = regex.Replace(archiveResult.ArchivedSnapshots.Closest.Url, substitution);
-
-                            //client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
 
                             MyLogger.Log.Information("Get SteamDB App");
                             var httpCall = client.GetAsync(newUrl);
@@ -162,7 +304,6 @@ namespace auto_creamapi.Services
 
                             var parser = new HtmlParser();
                             var doc = parser.ParseDocument(responseBody);
-                            // Console.WriteLine(doc.DocumentElement.OuterHtml);
 
                             var query1 = doc.QuerySelector("#dlc");
                             if (query1 != null)
@@ -217,8 +358,6 @@ namespace auto_creamapi.Services
                 {
                     MyLogger.Log.Error("Could not get DLC: Invalid Steam App");
                 }
-
-                //return dlcList;
             }
             catch (Exception e)
             {
