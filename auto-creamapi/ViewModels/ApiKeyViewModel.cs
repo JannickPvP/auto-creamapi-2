@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using auto_creamapi.Models;
 using auto_creamapi.Services;
 using Microsoft.Extensions.Logging;
 using MvvmCross.Commands;
@@ -7,11 +8,11 @@ using MvvmCross.ViewModels;
 
 namespace auto_creamapi.ViewModels
 {
-    public class ApiKeyViewModel : MvxNavigationViewModel<bool, bool>
+    public class ApiKeyViewModel : MvxNavigationViewModel<ApiKeyNavigationParameter, ApiKeyNavigationResult>
     {
         private readonly IConfigService _configService;
         private readonly ILogger<ApiKeyViewModel> _logger;
-        private string _apiKey;
+        private string _apiKey = string.Empty;
         private bool _isFirstRun;
 
         public ApiKeyViewModel(
@@ -32,6 +33,7 @@ namespace auto_creamapi.ViewModels
                 _apiKey = value;
                 RaisePropertyChanged(() => ApiKey);
                 RaisePropertyChanged(() => CanSave);
+                _saveCommand?.RaiseCanExecuteChanged();
             }
         }
 
@@ -55,14 +57,17 @@ namespace auto_creamapi.ViewModels
 
         public bool CanCancel => !IsFirstRun;
 
-        public IMvxCommand SaveCommand => new MvxAsyncCommand(Save, () => CanSave);
-        public IMvxCommand CancelCommand => new MvxAsyncCommand(Cancel, () => CanCancel);
+        private IMvxAsyncCommand _saveCommand;
+        private IMvxAsyncCommand _cancelCommand;
+
+        public IMvxCommand SaveCommand => _saveCommand ??= new MvxAsyncCommand(Save, () => CanSave);
+        public IMvxCommand CancelCommand => _cancelCommand ??= new MvxAsyncCommand(Cancel, () => CanCancel);
         public IMvxCommand OpenWebsiteCommand => new MvxCommand(OpenWebsite);
 
-        public override void Prepare(bool isFirstRun)
+        public override void Prepare(ApiKeyNavigationParameter parameter)
         {
-            IsFirstRun = isFirstRun;
-            if (!isFirstRun)
+            IsFirstRun = parameter?.IsFirstRun ?? false;
+            if (!IsFirstRun)
             {
                 ApiKey = _configService.GetSteamApiKey();
             }
@@ -72,12 +77,12 @@ namespace auto_creamapi.ViewModels
         {
             _configService.SetSteamApiKey(ApiKey);
             _logger.LogInformation("Steam API key saved");
-            await NavigationService.Close(this, true);
+            await NavigationService.Close(this, new ApiKeyNavigationResult { Success = true });
         }
 
         private async System.Threading.Tasks.Task Cancel()
         {
-            await NavigationService.Close(this, false);
+            await NavigationService.Close(this, new ApiKeyNavigationResult { Success = false });
         }
 
         private void OpenWebsite()

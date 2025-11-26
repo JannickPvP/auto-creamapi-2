@@ -74,11 +74,25 @@ namespace auto_creamapi.ViewModels
 
         public override async Task Initialize()
         {
-            MessageBox.Show("Could not download CreamAPI!\nPlease add CreamAPI DLLs manually!\nShutting down...",
-                "Error", MessageBoxButton.OK, MessageBoxImage.Error);
-            _token.Dispose();
-            await _navigationService.Close(this).ConfigureAwait(false);
-            Environment.Exit(0);
+            try
+            {
+                _logger.LogInformation("Starting CreamAPI download...");
+                var filename = await _download.Download().ConfigureAwait(false);
+                _logger.LogInformation("Download completed, starting extraction...");
+                await _download.Extract(filename).ConfigureAwait(false);
+                _logger.LogInformation("Extraction completed successfully");
+                _token.Dispose();
+                await _navigationService.Close(this).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to download or extract CreamAPI");
+                MessageBox.Show("Could not download CreamAPI!\nPlease add CreamAPI DLLs manually!\nShutting down...",
+                    "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                _token.Dispose();
+                await _navigationService.Close(this).ConfigureAwait(false);
+                Environment.Exit(0);
+            }
         }
 
         private void OnProgressMessage(ProgressMessage obj)

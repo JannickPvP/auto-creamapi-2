@@ -63,10 +63,11 @@ namespace auto_creamapi.ViewModels
                 Status = "Waiting for API key configuration...";
                 
                 var apiKeyResult = await _navigationService
-                    .Navigate<ApiKeyViewModel, bool, bool>(true)
+                    .Navigate<ApiKeyViewModel, ApiKeyNavigationParameter, ApiKeyNavigationResult>(
+                        new ApiKeyNavigationParameter { IsFirstRun = true })
                     .ConfigureAwait(false);
                 
-                if (!apiKeyResult)
+                if (apiKeyResult?.Success != true)
                 {
                     // User cancelled on first run, exit application
                     _logger.LogWarning("API key configuration cancelled on first run");
@@ -471,7 +472,10 @@ namespace auto_creamapi.ViewModels
             MainWindowEnabled = false;
             Status = "Opening API key settings...";
             
-            await _navigationService.Navigate<ApiKeyViewModel, bool, bool>(false).ConfigureAwait(false);
+            await _navigationService
+                .Navigate<ApiKeyViewModel, ApiKeyNavigationParameter, ApiKeyNavigationResult>(
+                    new ApiKeyNavigationParameter { IsFirstRun = false })
+                .ConfigureAwait(false);
             
             MainWindowEnabled = true;
             Status = "Ready.";
