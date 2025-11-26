@@ -15,9 +15,9 @@ Set your game automatically up for use with CreamAPI.
 Download the latest release and extract it into any folder (e.g. `%USERPROFILE%\Desktop\auto-creamapi`).
 
 ## Usage
-* Download creamapi and extract the content inside the folder.
 * Double-click `auto-creamapi.exe` to open the application. (When starting it for the first time, it might take a few
  seconds since it needs to cache a list of games available on the Steam Store and download the latest CreamAPI DLL files.)
+* Follow the onscreen prompts to create a API key, once done click **Save**
 * Click on the *Open File* button on the top right and select the *steam_api.dll* or *steam_api64.dll* 
   **in the game folder**.
 * Enter the name of the game and click on the *Search* button.
